@@ -2,13 +2,17 @@
 from __future__ import annotations
 import hashlib,uuid
 from .auth import Auth
+from .clock import SystemClock
+from .ledger import TreatmentLedgerService
 from .models import MonitoringRecord,ZoneRecord,as_dict,utcnow
 from .risk import violation_probability,score_monitoring_record
 from .storage import audit,connect,rows,transaction
 class BiosafetyService:
-    def __init__(self,database=":memory:"): self.db=connect(database); self.auth=Auth(self.db)
+    def __init__(self,database=":memory:",clock=None):
+        self.clock=clock or SystemClock(); self.db=connect(database); self.auth=Auth(self.db)
+        self.ledger=TreatmentLedgerService(self.db,self.clock,self.auth)
     def bootstrap(self):
-        for uid,pwd,role in (("admin","biosafety-admin","admin"),("operator","biosafety-operator","operator")):
+        for uid,pwd,role in (("admin","biosafety-admin","admin"),("operator","biosafety-operator","operator"),("quality","biosafety-quality","quality")):
             try:self.auth.create_user(uid,pwd,role)
             except Exception:pass
     def register_zone_record(self,token,zone_record):
