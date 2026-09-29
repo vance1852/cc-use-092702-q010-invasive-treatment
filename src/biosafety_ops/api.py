@@ -2,6 +2,7 @@
 from __future__ import annotations
 import argparse,json
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
+from .errors import LedgerError
 from .models import MonitoringRecord,ZoneRecord
 from .service import BiosafetyService
 class Handler(BaseHTTPRequestHandler):
@@ -11,11 +12,20 @@ class Handler(BaseHTTPRequestHandler):
     def _token(self):return self.headers.get("Authorization","").removeprefix("Bearer ")
     def do_GET(self):
         try:
+            svc=self.service.ledgers
             if self.path=="/health":return self._send(200,{"status":"ok","service":"urban-biosafety"})
             if self.path.startswith("/zone_records/") and self.path.endswith("/risk"):return self._send(200,self.service.risk_report(self._token(),self.path.split("/")[2]))
             if self.path.startswith("/zone_records/"):return self._send(200,self.service.zone_record(self._token(),self.path.split("/",2)[2]))
+            if self.path.startswith("/work-orders/") and self.path.endswith("/plans"):
+                ticket_id=self.path.split("/")[2]; return self._send(200,svc.list_versions(self._token(),ticket_id))
+            if self.path.startswith("/work-orders/") and self.path.endswith("/overview"):
+                ticket_id=self.path.split("/")[2]; return self._send(200,svc.ticket_overview(self._token(),ticket_id))
+            if self.path.startswith("/ledgers/"):
+                return self._send(200,svc.ledger(self._token(),self.path.rsplit("/",1)[-1]))
             return self._send(404,{"error":"not found"})
         except PermissionError as e:return self._send(403,{"error":str(e)})
+        except LedgerError as e:return self._send(e.status,{"error":str(e),"code":e.code})
+        except KeyError as e:return self._send(404,{"error":str(e)})
         except Exception as e:return self._send(400,{"error":str(e)})
     def do_POST(self):
         try:
@@ -27,8 +37,23 @@ class Handler(BaseHTTPRequestHandler):
                 sid=self.path.split("/")[2]; r=MonitoringRecord(body["monitoring_record_id"],sid,body["sensor_source_id"],body["speed_kmh"],body["traffic_flow_vph"],body["impact_index"],body["observed_at"]); return self._send(201,self.service.ingest_monitoring_record(token,r))
             if self.path.startswith("/zone_records/") and self.path.endswith("/work-orders"):
                 return self._send(201,self.service.create_treatment_ticket(token,self.path.split("/")[2],body["alert_id"],body["assignee"],body.get("priority",3)))
+            svc=self.service.ledgers
+            if self.path.startswith("/work-orders/") and self.path.endswith("/plans"):
+                return self._send(201,svc.create_plan(token,self.path.split("/")[2],body.get("impact_scope"),body.get("windows"),body.get("change_kind"),body.get("reason","")))
+            if self.path.startswith("/alerts/") and self.path.endswith("/withdraw"):
+                return self._send(200,svc.withdraw_risk(token,self.path.split("/")[2],body.get("reason","")))
+            if self.path.startswith("/ledgers/"):
+                parts=self.path.strip("/").split("/"); ledger_id=parts[1]; action=parts[2] if len(parts)>2 else ""
+                if action=="ack-notification": return self._send(200,svc.ack_notification(token,ledger_id,body["idempotency_key"],body["recipients"]))
+                if action=="isolation": return self._send(200,svc.report_isolation(token,ledger_id,body["idempotency_key"],body.get("isolated_at"),body.get("evidence")))
+                if action=="clearing": return self._send(200,svc.report_clearing(token,ledger_id,body["idempotency_key"],body["zone_code"],body["chemical_batches"]))
+                if action=="waste": return self._send(200,svc.report_waste(token,ledger_id,body["idempotency_key"],body["zone_code"],body["manifest_id"],body["carrier"],body["destination"],body["weight_kg"],body.get("handed_over_at"),body.get("evidence")))
+                if action=="review": return self._send(200,svc.submit_review(token,ledger_id,body["idempotency_key"],body["quadrats"]))
+                if action=="closeout": return self._send(200,svc.independent_closeout(token,ledger_id,body["result"],body.get("note",""),body.get("idempotency_key")))
             return self._send(404,{"error":"not found"})
         except PermissionError as e:return self._send(403,{"error":str(e)})
+        except LedgerError as e:return self._send(e.status,{"error":str(e),"code":e.code})
+        except KeyError as e:return self._send(400,{"error":f"缺少字段: {e}"})
         except Exception as e:return self._send(400,{"error":str(e)})
 def main():
     p=argparse.ArgumentParser(); p.add_argument("--database",default=":memory:"); p.add_argument("--host",default="127.0.0.1"); p.add_argument("--port",type=int,default=8080); a=p.parse_args(); Handler.service=BiosafetyService(a.database); Handler.service.bootstrap(); ThreadingHTTPServer((a.host,a.port),Handler).serve_forever()
